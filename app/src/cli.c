@@ -114,6 +114,7 @@ enum {
     OPT_NO_VD_SYSTEM_DECORATIONS,
     OPT_NO_VD_DESTROY_CONTENT,
     OPT_DISPLAY_IME_POLICY,
+    OPT_OTG_WIN_NATIVE,
 };
 
 struct sc_option {
@@ -744,6 +745,12 @@ static const struct sc_option options[] = {
                 "--keyboard=disabled and --mouse=disabled.\n"
                 "It may only work over USB.\n"
                 "See --keyboard, --mouse and --gamepad.",
+    },
+    {
+        .longopt_id = OPT_OTG_WIN_NATIVE,
+        .longopt = "otg-win-native",
+        .text = "Run OTG mode using native Windows API (Windows only).\n"
+                "Implies --otg.",
     },
     {
         .shortopt = 'p',
@@ -2684,6 +2691,20 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 break;
 #else
                 LOGE("OTG mode (--otg) is disabled.");
+                return false;
+#endif
+            case OPT_OTG_WIN_NATIVE:
+#ifdef HAVE_USB
+# ifdef _WIN32
+                opts->otg = true;
+                opts->win_native_otg = true;
+                break;
+# else
+                LOGE("--otg-win-native is only supported on Windows.");
+                return false;
+# endif
+#else
+                LOGE("OTG mode is disabled.");
                 return false;
 #endif
             case OPT_V4L2_SINK:

@@ -106,6 +106,12 @@ if usb_support
         'src/usb/screen_otg.c',
         'src/usb/usb.c',
     ]
+    if host_machine.system() == 'windows'
+        src += [
+            'src/usb/scrcpy_otg_win32.c',
+            'src/usb/screen_otg_win32.c',
+        ]
+    endif
 endif
 
 cc = meson.get_compiler('c')

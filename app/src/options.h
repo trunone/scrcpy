@@ -283,6 +283,9 @@ struct scrcpy_options {
 #endif
 #ifdef HAVE_USB
     bool otg;
+# ifdef _WIN32
+    bool win_native_otg;
+# endif
 #endif
     bool show_touches;
     bool fullscreen;

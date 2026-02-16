@@ -1,104 +1,68 @@
-#include "scrcpy_otg.h"
-
-#ifdef _WIN32
-# include "scrcpy_otg_win32.h"
-#endif
+#include "scrcpy_otg_win32.h"
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <SDL2/SDL.h>
+#include <windows.h>
 
-#ifdef _WIN32
-# include "adb/adb.h"
-#endif
-#include "events.h"
-#include "usb/screen_otg.h"
+#include "adb/adb.h"
 #include "usb/aoa_hid.h"
 #include "usb/gamepad_aoa.h"
 #include "usb/keyboard_aoa.h"
 #include "usb/mouse_aoa.h"
+#include "usb/screen_otg_win32.h"
 #include "util/log.h"
 
-struct scrcpy_otg {
+#define SC_WM_DEVICE_DISCONNECTED (WM_APP + 1)
+
+struct scrcpy_otg_win32 {
     struct sc_usb usb;
     struct sc_aoa aoa;
     struct sc_keyboard_aoa keyboard;
     struct sc_mouse_aoa mouse;
     struct sc_gamepad_aoa gamepad;
 
-    struct sc_screen_otg screen_otg;
+    struct sc_screen_otg_win32 screen;
 };
 
 static void
 sc_usb_on_disconnected(struct sc_usb *usb, void *userdata) {
     (void) usb;
-    (void) userdata;
+    struct scrcpy_otg_win32 *s = userdata;
 
-    sc_push_event(SC_EVENT_USB_DEVICE_DISCONNECTED);
+    PostMessage(s->screen.hwnd, SC_WM_DEVICE_DISCONNECTED, 0, 0);
 }
 
 static enum scrcpy_exit_code
-event_loop(struct scrcpy_otg *s) {
-    SDL_Event event;
-    while (SDL_WaitEvent(&event)) {
-        switch (event.type) {
-            case SC_EVENT_USB_DEVICE_DISCONNECTED:
-                LOGW("Device disconnected");
-                return SCRCPY_EXIT_DISCONNECTED;
-            case SC_EVENT_AOA_OPEN_ERROR:
-                LOGE("AOA open error");
-                return SCRCPY_EXIT_FAILURE;
-            case SDL_QUIT:
-                LOGD("User requested to quit");
-                return SCRCPY_EXIT_SUCCESS;
-            default:
-                sc_screen_otg_handle_event(&s->screen_otg, &event);
-                break;
+event_loop(struct scrcpy_otg_win32 *s) {
+    MSG msg;
+    BOOL bRet;
+    while ((bRet = GetMessage(&msg, NULL, 0, 0)) != 0) {
+        if (bRet == -1) {
+            // handle the error and possibly exit
+            LOGE("GetMessage error: %lu", GetLastError());
+            return SCRCPY_EXIT_FAILURE;
         }
+
+        if (msg.message == SC_WM_DEVICE_DISCONNECTED) {
+            LOGW("Device disconnected");
+            return SCRCPY_EXIT_DISCONNECTED;
+        }
+
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
-    return SCRCPY_EXIT_FAILURE;
+
+    // WM_QUIT received
+    return SCRCPY_EXIT_SUCCESS;
 }
 
 enum scrcpy_exit_code
-scrcpy_otg(struct scrcpy_options *options) {
-#ifdef _WIN32
-    if (options->win_native_otg) {
-        return scrcpy_otg_win32(options);
-    }
-#endif
-
-    static struct scrcpy_otg scrcpy_otg;
-    struct scrcpy_otg *s = &scrcpy_otg;
+scrcpy_otg_win32(struct scrcpy_options *options) {
+    static struct scrcpy_otg_win32 scrcpy_otg;
+    struct scrcpy_otg_win32 *s = &scrcpy_otg;
 
     const char *serial = options->serial;
-
-    if (!SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1")) {
-        LOGW("Could not enable linear filtering");
-    }
-
-    if (!SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1")) {
-        LOGW("Could not allow joystick background events");
-    }
-
-    // Minimal SDL initialization
-    if (SDL_Init(SDL_INIT_EVENTS)) {
-        LOGE("Could not initialize SDL: %s", SDL_GetError());
-        return SCRCPY_EXIT_FAILURE;
-    }
-
-    if (options->gamepad_input_mode != SC_GAMEPAD_INPUT_MODE_DISABLED) {
-        if (SDL_Init(SDL_INIT_GAMECONTROLLER)) {
-            LOGE("Could not initialize SDL controller: %s", SDL_GetError());
-            // Not fatal, keyboard/mouse should still work
-        }
-    }
-
-    atexit(SDL_Quit);
-
-    if (!SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1")) {
-        LOGW("Could not enable mouse focus clickthrough");
-    }
 
     enum scrcpy_exit_code ret = SCRCPY_EXIT_FAILURE;
 
@@ -110,7 +74,6 @@ scrcpy_otg(struct scrcpy_options *options) {
     bool aoa_started = false;
     bool aoa_initialized = false;
 
-#ifdef _WIN32
     // On Windows, only one process could open a USB device
     // <https://github.com/Genymobile/scrcpy/issues/2773>
     LOGI("Killing adb server (if any)...");
@@ -122,7 +85,6 @@ scrcpy_otg(struct scrcpy_options *options) {
     } else {
         LOGW("Could not call adb executable, adb server not killed");
     }
-#endif
 
     static const struct sc_usb_callbacks cbs = {
         .on_disconnected = sc_usb_on_disconnected,
@@ -140,7 +102,7 @@ scrcpy_otg(struct scrcpy_options *options) {
 
     usb_device_initialized = true;
 
-    ok = sc_usb_connect(&s->usb, usb_device.device, &cbs, NULL);
+    ok = sc_usb_connect(&s->usb, usb_device.device, &cbs, s);
     if (!ok) {
         goto end;
     }
@@ -198,7 +160,7 @@ scrcpy_otg(struct scrcpy_options *options) {
         window_title = usb_device.product ? usb_device.product : "scrcpy";
     }
 
-    struct sc_screen_otg_params params = {
+    struct sc_screen_otg_win32_params params = {
         .keyboard = keyboard,
         .mouse = mouse,
         .gamepad = gamepad,
@@ -212,7 +174,7 @@ scrcpy_otg(struct scrcpy_options *options) {
         .shortcut_mods = options->shortcut_mods,
     };
 
-    ok = sc_screen_otg_init(&s->screen_otg, &params);
+    ok = sc_screen_otg_win32_init(&s->screen, &params);
     if (!ok) {
         goto end;
     }
@@ -225,6 +187,10 @@ scrcpy_otg(struct scrcpy_options *options) {
     LOGD("quit...");
 
 end:
+    if (s->screen.hwnd) {
+        sc_screen_otg_win32_destroy(&s->screen);
+    }
+
     if (aoa_started) {
         sc_aoa_stop(&s->aoa);
     }

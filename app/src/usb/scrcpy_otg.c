@@ -1,9 +1,5 @@
 #include "scrcpy_otg.h"
 
-#ifdef _WIN32
-# include "scrcpy_otg_win32.h"
-#endif
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -30,10 +26,20 @@ struct scrcpy_otg {
     struct sc_screen_otg screen_otg;
 };
 
+#define SC_WM_DEVICE_DISCONNECTED (WM_APP + 1)
+
 static void
 sc_usb_on_disconnected(struct sc_usb *usb, void *userdata) {
     (void) usb;
+#ifdef _WIN32
+    struct scrcpy_otg *s = userdata;
+    if (s->screen_otg.native) {
+        PostMessage(s->screen_otg.hwnd, SC_WM_DEVICE_DISCONNECTED, 0, 0);
+        return;
+    }
+#else
     (void) userdata;
+#endif
 
     sc_push_event(SC_EVENT_USB_DEVICE_DISCONNECTED);
 }
@@ -60,44 +66,70 @@ event_loop(struct scrcpy_otg *s) {
     return SCRCPY_EXIT_FAILURE;
 }
 
-enum scrcpy_exit_code
-scrcpy_otg(struct scrcpy_options *options) {
 #ifdef _WIN32
-    if (options->win_native_otg) {
-        return scrcpy_otg_win32(options);
+static enum scrcpy_exit_code
+event_loop_win32(struct scrcpy_otg *s) {
+    MSG msg;
+    BOOL bRet;
+    while ((bRet = GetMessage(&msg, NULL, 0, 0)) != 0) {
+        if (bRet == -1) {
+            LOGE("GetMessage error: %lu", GetLastError());
+            return SCRCPY_EXIT_FAILURE;
+        }
+
+        if (msg.message == SC_WM_DEVICE_DISCONNECTED) {
+            LOGW("Device disconnected");
+            return SCRCPY_EXIT_DISCONNECTED;
+        }
+
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
+
+    return SCRCPY_EXIT_SUCCESS;
+}
 #endif
 
+enum scrcpy_exit_code
+scrcpy_otg(struct scrcpy_options *options) {
     static struct scrcpy_otg scrcpy_otg;
     struct scrcpy_otg *s = &scrcpy_otg;
 
     const char *serial = options->serial;
 
-    if (!SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1")) {
-        LOGW("Could not enable linear filtering");
-    }
+#ifdef _WIN32
+    bool native = options->win_native_otg;
+#else
+    bool native = false;
+#endif
 
-    if (!SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1")) {
-        LOGW("Could not allow joystick background events");
-    }
-
-    // Minimal SDL initialization
-    if (SDL_Init(SDL_INIT_EVENTS)) {
-        LOGE("Could not initialize SDL: %s", SDL_GetError());
-        return SCRCPY_EXIT_FAILURE;
-    }
-
-    if (options->gamepad_input_mode != SC_GAMEPAD_INPUT_MODE_DISABLED) {
-        if (SDL_Init(SDL_INIT_GAMECONTROLLER)) {
-            LOGE("Could not initialize SDL controller: %s", SDL_GetError());
-            // Not fatal, keyboard/mouse should still work
+    if (!native) {
+        if (!SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1")) {
+            LOGW("Could not enable linear filtering");
         }
-    }
 
-    atexit(SDL_Quit);
+        if (!SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1")) {
+            LOGW("Could not allow joystick background events");
+        }
 
-    if (!SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1")) {
-        LOGW("Could not enable mouse focus clickthrough");
+        // Minimal SDL initialization
+        if (SDL_Init(SDL_INIT_EVENTS)) {
+            LOGE("Could not initialize SDL: %s", SDL_GetError());
+            return SCRCPY_EXIT_FAILURE;
+        }
+
+        if (options->gamepad_input_mode != SC_GAMEPAD_INPUT_MODE_DISABLED) {
+            if (SDL_Init(SDL_INIT_GAMECONTROLLER)) {
+                LOGE("Could not initialize SDL controller: %s", SDL_GetError());
+                // Not fatal, keyboard/mouse should still work
+            }
+        }
+
+        atexit(SDL_Quit);
+
+        if (!SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1")) {
+            LOGW("Could not enable mouse focus clickthrough");
+        }
     }
 
     enum scrcpy_exit_code ret = SCRCPY_EXIT_FAILURE;
@@ -140,7 +172,7 @@ scrcpy_otg(struct scrcpy_options *options) {
 
     usb_device_initialized = true;
 
-    ok = sc_usb_connect(&s->usb, usb_device.device, &cbs, NULL);
+    ok = sc_usb_connect(&s->usb, usb_device.device, &cbs, s);
     if (!ok) {
         goto end;
     }
@@ -210,6 +242,9 @@ scrcpy_otg(struct scrcpy_options *options) {
         .window_height = options->window_height,
         .window_borderless = options->window_borderless,
         .shortcut_mods = options->shortcut_mods,
+#ifdef _WIN32
+        .native = native,
+#endif
     };
 
     ok = sc_screen_otg_init(&s->screen_otg, &params);
@@ -221,10 +256,21 @@ scrcpy_otg(struct scrcpy_options *options) {
     sc_usb_device_destroy(&usb_device);
     usb_device_initialized = false;
 
-    ret = event_loop(s);
+#ifdef _WIN32
+    if (native) {
+        ret = event_loop_win32(s);
+    } else
+#endif
+    {
+        ret = event_loop(s);
+    }
     LOGD("quit...");
 
 end:
+    if (native) {
+        sc_screen_otg_destroy(&s->screen_otg);
+    }
+
     if (aoa_started) {
         sc_aoa_stop(&s->aoa);
     }

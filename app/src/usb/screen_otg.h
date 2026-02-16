@@ -12,6 +12,10 @@
 #include "usb/keyboard_aoa.h"
 #include "usb/mouse_aoa.h"
 
+#ifdef _WIN32
+# include <windows.h>
+#endif
+
 struct sc_screen_otg {
     struct sc_keyboard_aoa *keyboard;
     struct sc_mouse_aoa *mouse;
@@ -22,6 +26,12 @@ struct sc_screen_otg {
     SDL_Texture *texture;
 
     struct sc_mouse_capture mc;
+
+#ifdef _WIN32
+    bool native;
+    HWND hwnd;
+    bool mouse_captured;
+#endif
 };
 
 struct sc_screen_otg_params {
@@ -30,6 +40,9 @@ struct sc_screen_otg_params {
     struct sc_gamepad_aoa *gamepad;
 
     const char *window_title;
+#ifdef _WIN32
+    bool native;
+#endif
     bool always_on_top;
     int16_t window_x; // accepts SC_WINDOW_POSITION_UNDEFINED
     int16_t window_y; // accepts SC_WINDOW_POSITION_UNDEFINED

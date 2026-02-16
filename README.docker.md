@@ -41,6 +41,24 @@ To build and extract the binary:
 docker run --rm -v $(pwd):/app scrcpy-env /bin/bash -c "meson setup build --buildtype=release --strip -Db_lto=true && ninja -C build"
 ```
 
+## Running Release Scripts
+
+The container includes dependencies for running the release scripts (like cross-compilation for Windows).
+
+To run a specific release script, for example to build the Windows release:
+
+```bash
+docker run --rm -v $(pwd):/app scrcpy-env ./release/build_windows.sh 64
+```
+
+To run the full release process (which builds for Linux and Windows, and packages everything):
+
+```bash
+docker run --rm -v $(pwd):/app scrcpy-env ./release/release.sh
+```
+
+The release artifacts will be generated in the `release/output` directory (which will be mounted to your host if you use `-v $(pwd):/app`).
+
 ## Running Tests
 
 To run the tests inside the container:

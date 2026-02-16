@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y \
     libswresample-dev \
     libusb-1.0-0-dev \
     openjdk-17-jdk \
+    mingw-w64 \
+    nasm \
+    zip \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up Android SDK environment variables

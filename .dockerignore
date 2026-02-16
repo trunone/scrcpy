@@ -1,0 +1,12 @@
+.git
+build
+build_manual
+dist
+release
+*.apk
+*.jar
+*.pyc
+__pycache__
+.gradle
+.idea
+.vscode

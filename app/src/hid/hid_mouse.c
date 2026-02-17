@@ -3,8 +3,9 @@
 #include <stdint.h>
 
 // 1 byte for buttons + padding, 1 byte for X position, 1 byte for Y position,
-// 1 byte for wheel motion, 1 byte for hozizontal scrolling
-#define SC_HID_MOUSE_INPUT_SIZE 5
+// 1 byte for wheel motion, 1 byte for hozizontal scrolling, 1 byte for
+// AC back/forward + padding
+#define SC_HID_MOUSE_INPUT_SIZE 6
 
 /**
  * Mouse descriptor from the specification:
@@ -36,24 +37,24 @@ static const uint8_t SC_HID_MOUSE_REPORT_DESC[] = {
 
     // Usage Minimum (1)
     0x19, 0x01,
-    // Usage Maximum (5)
-    0x29, 0x05,
+    // Usage Maximum (3)
+    0x29, 0x03,
     // Logical Minimum (0)
     0x15, 0x00,
     // Logical Maximum (1)
     0x25, 0x01,
-    // Report Count (5)
-    0x95, 0x05,
+    // Report Count (3)
+    0x95, 0x03,
     // Report Size (1)
     0x75, 0x01,
-    // Input (Data, Variable, Absolute): 5 buttons bits
+    // Input (Data, Variable, Absolute): 3 buttons bits
     0x81, 0x02,
 
     // Report Count (1)
     0x95, 0x01,
-    // Report Size (3)
-    0x75, 0x03,
-    // Input (Constant): 3 bits padding
+    // Report Size (5)
+    0x75, 0x05,
+    // Input (Constant): 5 bits padding
     0x81, 0x01,
 
     // Usage Page (Generic Desktop)
@@ -90,6 +91,28 @@ static const uint8_t SC_HID_MOUSE_REPORT_DESC[] = {
     // Input (Data, Variable, Relative): 1 byte (AC Pan)
     0x81, 0x06,
 
+    // Usage (AC Back)
+    0x0A, 0x24, 0x02,
+    // Usage (AC Forward)
+    0x0A, 0x25, 0x02,
+    // Logical Minimum (0)
+    0x15, 0x00,
+    // Logical Maximum (1)
+    0x25, 0x01,
+    // Report Size (1)
+    0x75, 0x01,
+    // Report Count (2)
+    0x95, 0x02,
+    // Input (Data, Variable, Absolute): 2 buttons bits
+    0x81, 0x02,
+
+    // Report Count (1)
+    0x95, 0x01,
+    // Report Size (6)
+    0x75, 0x06,
+    // Input (Constant): 6 bits padding
+    0x81, 0x01,
+
     // End Collection
     0xC0,
 
@@ -98,23 +121,23 @@ static const uint8_t SC_HID_MOUSE_REPORT_DESC[] = {
 };
 
 /**
- * A mouse HID input report is 4 bytes long:
+ * A mouse HID input report is 6 bytes long:
  *
  *  - byte 0: buttons state
  *  - byte 1: relative x motion (signed byte from -127 to 127)
  *  - byte 2: relative y motion (signed byte from -127 to 127)
  *  - byte 3: wheel motion (-1, 0 or 1)
+ *  - byte 4: horizontal wheel motion (-1, 0 or 1)
+ *  - byte 5: back/forward buttons state
  *
  *                   7 6 5 4 3 2 1 0
  *                  +---------------+
- *         byte 0:  |0 0 0 . . . . .| buttons state
+ *         byte 0:  |. . . . . 0 0 0| buttons state
  *                  +---------------+
- *                         ^ ^ ^ ^ ^
- *                         | | | | `- left button
- *                         | | | `--- right button
- *                         | | `----- middle button
- *                         | `------- button 4
- *                         `--------- button 5
+ *                             ^ ^ ^
+ *                             | | `- left button
+ *                             | `--- right button
+ *                             `----- middle button
  *
  *                  +---------------+
  *         byte 1:  |. . . . . . . .| relative x motion
@@ -123,6 +146,16 @@ static const uint8_t SC_HID_MOUSE_REPORT_DESC[] = {
  *                  +---------------+
  *         byte 3:  |. . . . . . . .| wheel motion
  *                  +---------------+
+ *         byte 4:  |. . . . . . . .| horizontal wheel motion
+ *                  +---------------+
+ *
+ *                   7 6 5 4 3 2 1 0
+ *                  +---------------+
+ *         byte 5:  |. . . . . . 0 0| back/forward buttons state
+ *                  +---------------+
+ *                               ^ ^
+ *                               | `- AC Back
+ *                               `--- AC Forward
  *
  * As an example, here is the report for a motion of (x=5, y=-4) with left
  * button pressed:
@@ -135,6 +168,10 @@ static const uint8_t SC_HID_MOUSE_REPORT_DESC[] = {
  *                  |1 1 1 1 1 1 0 0| relative y motion (y = -4)
  *                  +---------------+
  *                  |0 0 0 0 0 0 0 0| wheel motion
+ *                  +---------------+
+ *                  |0 0 0 0 0 0 0 0| horizontal wheel motion
+ *                  +---------------+
+ *                  |0 0 0 0 0 0 0 0| back/forward buttons state
  *                  +---------------+
  */
 
@@ -157,11 +194,17 @@ sc_hid_buttons_from_buttons_state(uint8_t buttons_state) {
     if (buttons_state & SC_MOUSE_BUTTON_MIDDLE) {
         c |= 1 << 2;
     }
+    return c;
+}
+
+static uint8_t
+sc_hid_back_forward_from_buttons_state(uint8_t buttons_state) {
+    uint8_t c = 0;
     if (buttons_state & SC_MOUSE_BUTTON_X1) {
-        c |= 1 << 3;
+        c |= 1 << 0;
     }
     if (buttons_state & SC_MOUSE_BUTTON_X2) {
-        c |= 1 << 4;
+        c |= 1 << 1;
     }
     return c;
 }
@@ -183,6 +226,7 @@ sc_hid_mouse_generate_input_from_motion(struct sc_hid_input *hid_input,
     data[2] = CLAMP(event->yrel, -127, 127);
     data[3] = 0; // no vertical scrolling
     data[4] = 0; // no horizontal scrolling
+    data[5] = sc_hid_back_forward_from_buttons_state(event->buttons_state);
 }
 
 void
@@ -196,6 +240,7 @@ sc_hid_mouse_generate_input_from_click(struct sc_hid_input *hid_input,
     data[2] = 0; // no y motion
     data[3] = 0; // no vertical scrolling
     data[4] = 0; // no horizontal scrolling
+    data[5] = sc_hid_back_forward_from_buttons_state(event->buttons_state);
 }
 
 static int8_t
@@ -229,6 +274,7 @@ sc_hid_mouse_generate_input_from_scroll(struct sc_hid_mouse *hid,
     data[2] = 0; // no y motion
     data[3] = vscroll;
     data[4] = hscroll;
+    data[5] = sc_hid_back_forward_from_buttons_state(event->buttons_state);
     return true;
 }
 

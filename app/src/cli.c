@@ -604,7 +604,7 @@ static const struct sc_option options[] = {
                 " 'h': trigger shortcut HOME\n"
                 " 's': trigger shortcut APP_SWITCH\n"
                 " 'n': trigger shortcut \"expand notification panel\"\n"
-                "Default is 'bhsn:++++' for SDK mouse, and '++++:bhsn' for AOA "
+                "Default is 'bh++:++++' for SDK mouse, and '++++:bhsn' for AOA "
                 "and UHID.",
     },
     {
@@ -2974,8 +2974,8 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
         static struct sc_mouse_binding_set default_shortcuts = {
             .right_click = SC_MOUSE_BINDING_BACK,
             .middle_click = SC_MOUSE_BINDING_HOME,
-            .click4 = SC_MOUSE_BINDING_APP_SWITCH,
-            .click5 = SC_MOUSE_BINDING_EXPAND_NOTIFICATION_PANEL,
+            .click4 = SC_MOUSE_BINDING_CLICK,
+            .click5 = SC_MOUSE_BINDING_CLICK,
         };
 
         static struct sc_mouse_binding_set forward = {

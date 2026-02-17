@@ -226,17 +226,16 @@ sc_screen_otg_handle_mouse_button(struct sc_screen_otg *screen, enum sc_mouse_bu
 
     struct sc_mouse_processor *mp = &screen->mouse->mouse_processor;
 
-    static uint8_t buttons_state = 0;
     if (down) {
-        buttons_state |= button;
+        screen->mouse_buttons_state |= button;
     } else {
-        buttons_state &= ~button;
+        screen->mouse_buttons_state &= ~button;
     }
 
     struct sc_mouse_click_event evt = {
         .action = down ? SC_ACTION_DOWN : SC_ACTION_UP,
         .button = button,
-        .buttons_state = buttons_state,
+        .buttons_state = screen->mouse_buttons_state,
     };
 
     assert(mp->ops->process_mouse_click);
@@ -273,7 +272,7 @@ sc_screen_otg_handle_raw_input(struct sc_screen_otg *screen, WPARAM wparam, LPAR
             struct sc_mouse_motion_event evt = {
                 .xrel = xrel,
                 .yrel = yrel,
-                .buttons_state = 0, // TODO: sync with buttons state
+                .buttons_state = screen->mouse_buttons_state,
             };
             assert(mp->ops->process_mouse_motion);
             mp->ops->process_mouse_motion(mp, &evt);
@@ -288,7 +287,7 @@ sc_screen_otg_handle_raw_input(struct sc_screen_otg *screen, WPARAM wparam, LPAR
                 .hscroll = 0,
                 .vscroll_int = (int)amount, // Might need accumulation
                 .hscroll_int = 0,
-                .buttons_state = 0,
+                .buttons_state = screen->mouse_buttons_state,
             };
              assert(mp->ops->process_mouse_scroll);
              mp->ops->process_mouse_scroll(mp, &evt);
@@ -346,13 +345,13 @@ WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                  int button = GET_XBUTTON_WPARAM(wParam);
                  sc_screen_otg_handle_mouse_button(screen, button == XBUTTON1 ? SC_MOUSE_BUTTON_X1 : SC_MOUSE_BUTTON_X2, true);
              }
-             return 0;
+             return TRUE;
         case WM_XBUTTONUP:
              if (screen) {
                  int button = GET_XBUTTON_WPARAM(wParam);
                  sc_screen_otg_handle_mouse_button(screen, button == XBUTTON1 ? SC_MOUSE_BUTTON_X1 : SC_MOUSE_BUTTON_X2, false);
              }
-             return 0;
+             return TRUE;
         case WM_ACTIVATE:
             if (screen && screen->mouse_captured && LOWORD(wParam) == WA_INACTIVE) {
                 sc_screen_otg_toggle_mouse_capture(screen); // Release capture on focus loss
@@ -366,6 +365,7 @@ static bool
 sc_screen_otg_init_win32(struct sc_screen_otg *screen,
                          const struct sc_screen_otg_params *params) {
     screen->mouse_captured = false;
+    screen->mouse_buttons_state = 0;
 
     const char *class_name = "ScrcpyOTG";
     HINSTANCE hInstance = GetModuleHandle(NULL);

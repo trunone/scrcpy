@@ -31,6 +31,7 @@ struct sc_screen_otg {
     bool native;
     HWND hwnd;
     bool mouse_captured;
+    uint8_t mouse_buttons_state;
 #endif
 };
 

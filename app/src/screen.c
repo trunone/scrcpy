@@ -4,6 +4,10 @@
 #include <string.h>
 #include <SDL2/SDL.h>
 
+#ifdef _WIN32
+# include <windows.h>
+#endif
+
 #include "events.h"
 #include "icon.h"
 #include "options.h"
@@ -335,6 +339,7 @@ sc_screen_init(struct sc_screen *screen,
     screen->orientation = SC_ORIENTATION_0;
 
     screen->video = params->video;
+    screen->native_window = NULL;
 
     screen->req.x = params->window_x;
     screen->req.y = params->window_y;
@@ -394,7 +399,66 @@ sc_screen_init(struct sc_screen *screen,
     }
 
     // The window will be positioned and sized on first video frame
-    screen->window = SDL_CreateWindow(title, x, y, width, height, window_flags);
+    if (params->window_native) {
+#ifdef _WIN32
+        int len = MultiByteToWideChar(CP_UTF8, 0, title, -1, NULL, 0);
+        wchar_t *wtitle = malloc(len * sizeof(wchar_t));
+        if (!wtitle) {
+            LOG_OOM();
+            goto error_destroy_fps_counter;
+        }
+        MultiByteToWideChar(CP_UTF8, 0, title, -1, wtitle, len);
+
+        const wchar_t *class_name = L"ScrcpyWindow";
+        WNDCLASSW wc = {0};
+        if (!GetClassInfoW(GetModuleHandle(NULL), class_name, &wc)) {
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = GetModuleHandle(NULL);
+            wc.lpszClassName = class_name;
+            wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+            wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+            if (!RegisterClassW(&wc)) {
+                LOGE("Could not register native window class");
+                free(wtitle);
+                goto error_destroy_fps_counter;
+            }
+        }
+
+        DWORD style = WS_OVERLAPPEDWINDOW;
+        if (params->window_borderless) {
+            style = WS_POPUP;
+        }
+        if (!(window_flags & SDL_WINDOW_HIDDEN)) {
+            style |= WS_VISIBLE;
+        }
+
+        DWORD ex_style = 0;
+        if (params->always_on_top) {
+            ex_style |= WS_EX_TOPMOST;
+        }
+
+        int nx = x == (int) SDL_WINDOWPOS_UNDEFINED ? CW_USEDEFAULT : x;
+        int ny = y == (int) SDL_WINDOWPOS_UNDEFINED ? CW_USEDEFAULT : y;
+
+        HWND hwnd = CreateWindowExW(ex_style, class_name, wtitle, style,
+                                    nx, ny, width, height, NULL, NULL,
+                                    GetModuleHandle(NULL), NULL);
+        free(wtitle);
+        if (!hwnd) {
+            LOGE("Could not create native window");
+            goto error_destroy_fps_counter;
+        }
+
+        screen->native_window = hwnd;
+        screen->window = SDL_CreateWindowFrom((void *) hwnd);
+#else
+        LOGE("Native window is only supported on Windows");
+        goto error_destroy_fps_counter;
+#endif
+    } else {
+        screen->window = SDL_CreateWindow(title, x, y, width, height, window_flags);
+    }
+
     if (!screen->window) {
         LOGE("Could not create window: %s", SDL_GetError());
         goto error_destroy_fps_counter;
@@ -533,6 +597,11 @@ sc_screen_destroy(struct sc_screen *screen) {
     sc_display_destroy(&screen->display);
     av_frame_free(&screen->frame);
     SDL_DestroyWindow(screen->window);
+    if (screen->native_window) {
+#ifdef _WIN32
+        DestroyWindow((HWND) screen->native_window);
+#endif
+    }
     sc_fps_counter_destroy(&screen->fps_counter);
     sc_frame_buffer_destroy(&screen->fb);
 }

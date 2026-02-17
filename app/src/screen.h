@@ -48,6 +48,7 @@ struct sc_screen {
     } req;
 
     SDL_Window *window;
+    void *native_window; // HWND on Windows
     struct sc_size frame_size;
     struct sc_size content_size; // rotated frame_size
 
@@ -94,6 +95,7 @@ struct sc_screen_params {
     uint16_t window_height;
 
     bool window_borderless;
+    bool window_native;
 
     enum sc_orientation orientation;
     bool mipmaps;

@@ -114,6 +114,7 @@ enum {
     OPT_NO_VD_SYSTEM_DECORATIONS,
     OPT_NO_VD_DESTROY_CONTENT,
     OPT_DISPLAY_IME_POLICY,
+    OPT_WINDOW_NATIVE,
 };
 
 struct sc_option {
@@ -1028,6 +1029,11 @@ static const struct sc_option options[] = {
         .longopt_id = OPT_WINDOW_BORDERLESS,
         .longopt = "window-borderless",
         .text = "Disable window decorations (display borderless window)."
+    },
+    {
+        .longopt_id = OPT_WINDOW_NATIVE,
+        .longopt = "window-native",
+        .text = "Use native window instead of SDL window."
     },
     {
         .longopt_id = OPT_WINDOW_TITLE,
@@ -2539,6 +2545,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 break;
             case OPT_WINDOW_BORDERLESS:
                 opts->window_borderless = true;
+                break;
+            case OPT_WINDOW_NATIVE:
+                opts->window_native = true;
                 break;
             case OPT_PUSH_TARGET:
                 opts->push_target = optarg;

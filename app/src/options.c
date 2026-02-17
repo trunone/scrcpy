@@ -104,6 +104,7 @@ const struct scrcpy_options scrcpy_options_default = {
     .require_audio = false,
     .kill_adb_on_close = false,
     .camera_high_speed = false,
+    .window_native = false,
     .list = 0,
     .window = true,
     .mouse_hover = true,

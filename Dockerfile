@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y \
     mingw-w64 \
     nasm \
     zip \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up Android SDK environment variables
@@ -52,17 +53,26 @@ RUN yes | sdkmanager --licenses \
 RUN useradd -m scrcpy
 
 # Grant permissions to the Android SDK directory
-RUN chown -R scrcpy:scrcpy $ANDROID_HOME
+# We use a group 'android_sdk' to allow the scrcpy user to access the SDK
+# even if its UID/GID changes at runtime.
+RUN groupadd -r android_sdk \
+    && usermod -aG android_sdk scrcpy \
+    && chown -R :android_sdk $ANDROID_HOME \
+    && chmod -R g+rwX $ANDROID_HOME
 
 # Set the working directory
 WORKDIR /app
+
+# Copy the entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Copy the project files into the container
 # Use --chown to ensure the files are owned by the scrcpy user
 COPY --chown=scrcpy:scrcpy . .
 
-# Switch to the non-root user
-USER scrcpy
+# Set the entrypoint
+ENTRYPOINT ["/entrypoint.sh"]
 
 # Define the default command to build the project
 # We use a shell to execute multiple commands: setup and build

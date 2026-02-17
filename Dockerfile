@@ -7,6 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    wget \
     unzip \
     git \
     python3 \

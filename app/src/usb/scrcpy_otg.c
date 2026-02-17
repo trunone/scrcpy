@@ -69,6 +69,8 @@ event_loop(struct scrcpy_otg *s) {
 #ifdef _WIN32
 static enum scrcpy_exit_code
 event_loop_win32(struct scrcpy_otg *s) {
+    (void) s;
+
     MSG msg;
     BOOL bRet;
     while ((bRet = GetMessage(&msg, NULL, 0, 0)) != 0) {

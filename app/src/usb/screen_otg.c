@@ -155,6 +155,8 @@ get_mods_state(void) {
 
 static void
 sc_screen_otg_handle_key_event(struct sc_screen_otg *screen, UINT msg, WPARAM wparam, LPARAM lparam) {
+    (void) wparam; // Unused (we use scan code from lparam)
+
     if (!screen->keyboard) {
         return;
     }
@@ -243,6 +245,8 @@ sc_screen_otg_handle_mouse_button(struct sc_screen_otg *screen, enum sc_mouse_bu
 
 static void
 sc_screen_otg_handle_raw_input(struct sc_screen_otg *screen, WPARAM wparam, LPARAM lparam) {
+    (void) wparam; // Unused
+
     if (!screen->mouse || !screen->mouse_captured) {
         return;
     }

@@ -220,7 +220,7 @@ sc_screen_otg_process_mouse_button(struct sc_screen_otg *screen,
             switch (binding) {
                 case SC_MOUSE_BINDING_HOME:
                     sc_screen_otg_inject_key(screen->keyboard, action,
-                                             SC_SCANCODE_HOME, 0);
+                                             SC_SCANCODE_RETURN, SC_MOD_LGUI);
                     break;
                 case SC_MOUSE_BINDING_APP_SWITCH:
                     sc_screen_otg_inject_key(screen->keyboard, action,

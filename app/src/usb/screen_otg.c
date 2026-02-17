@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "icon.h"
+#include "input_events.h"
 #include "options.h"
 #include "util/acksync.h"
 #include "util/log.h"
@@ -22,12 +23,52 @@ sc_screen_otg_render(struct sc_screen_otg *screen) {
     sc_sdl_render_present(screen->renderer);
 }
 
+static enum sc_mouse_binding
+sc_screen_otg_get_binding(const struct sc_mouse_binding_set *bindings,
+                          uint8_t sdl_button) {
+    switch (sdl_button) {
+        case SDL_BUTTON_LEFT:
+            return SC_MOUSE_BINDING_CLICK;
+        case SDL_BUTTON_RIGHT:
+            return bindings->right_click;
+        case SDL_BUTTON_MIDDLE:
+            return bindings->middle_click;
+        case SDL_BUTTON_X1:
+            return bindings->click4;
+        case SDL_BUTTON_X2:
+            return bindings->click5;
+        default:
+            return SC_MOUSE_BINDING_DISABLED;
+    }
+}
+
+static void
+sc_screen_otg_inject_key(struct sc_keyboard_aoa *keyboard,
+                         enum sc_action action, enum sc_scancode scancode,
+                         uint16_t mods) {
+    if (!keyboard) {
+        return;
+    }
+    struct sc_key_event evt = {
+        .action = action,
+        .keycode = SC_KEYCODE_UNKNOWN, // not used for HID
+        .scancode = scancode,
+        .mods_state = mods,
+        .repeat = false,
+    };
+    struct sc_key_processor *kp = &keyboard->key_processor;
+    assert(kp->ops->process_key);
+    kp->ops->process_key(kp, &evt, SC_SEQUENCE_INVALID);
+}
+
 bool
 sc_screen_otg_init(struct sc_screen_otg *screen,
                    const struct sc_screen_otg_params *params) {
     screen->keyboard = params->keyboard;
     screen->mouse = params->mouse;
     screen->gamepad = params->gamepad;
+    screen->mouse_bindings = params->mouse_bindings;
+    screen->mouse_buttons_state = 0;
 
     const char *title = params->window_title;
     assert(title);
@@ -140,7 +181,7 @@ sc_screen_otg_process_mouse_motion(struct sc_screen_otg *screen,
         // .position not used for HID events
         .xrel = event->xrel,
         .yrel = event->yrel,
-        .buttons_state = sc_mouse_buttons_state_from_sdl(event->state),
+        .buttons_state = screen->mouse_buttons_state,
     };
 
     assert(mp->ops->process_mouse_motion);
@@ -153,13 +194,72 @@ sc_screen_otg_process_mouse_button(struct sc_screen_otg *screen,
     assert(screen->mouse);
     struct sc_mouse_processor *mp = &screen->mouse->mouse_processor;
 
-    uint32_t sdl_buttons_state = SDL_GetMouseState(NULL, NULL);
+    bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+
+    SDL_Keymod keymod = SDL_GetModState();
+    bool shift_pressed = keymod & SDL_KMOD_SHIFT;
+
+    struct sc_mouse_binding_set *bindings = !shift_pressed
+                                          ? &screen->mouse_bindings.pri
+                                          : &screen->mouse_bindings.sec;
+
+    enum sc_mouse_binding binding =
+        sc_screen_otg_get_binding(bindings, event->button);
+
+    enum sc_mouse_button button = sc_mouse_button_from_sdl(event->button);
+    if (button == SC_MOUSE_BUTTON_UNKNOWN) {
+        return;
+    }
+
+    if (binding != SC_MOUSE_BINDING_CLICK &&
+            binding != SC_MOUSE_BINDING_BACK &&
+            binding != SC_MOUSE_BINDING_DISABLED) {
+        // Handle key bindings
+        if (screen->keyboard) {
+            enum sc_action action = down ? SC_ACTION_DOWN : SC_ACTION_UP;
+            switch (binding) {
+                case SC_MOUSE_BINDING_HOME:
+                    sc_screen_otg_inject_key(screen->keyboard, action,
+                                             SC_SCANCODE_HOME, 0);
+                    break;
+                case SC_MOUSE_BINDING_APP_SWITCH:
+                    sc_screen_otg_inject_key(screen->keyboard, action,
+                                             SC_SCANCODE_TAB, SC_MOD_LALT);
+                    break;
+                case SC_MOUSE_BINDING_EXPAND_NOTIFICATION_PANEL:
+                    sc_screen_otg_inject_key(screen->keyboard, action,
+                                             SC_SCANCODE_N, SC_MOD_LGUI);
+                    break;
+                default:
+                    break;
+            }
+        }
+        return;
+    }
+
+    if (binding == SC_MOUSE_BINDING_DISABLED) {
+        return;
+    }
+
+    // Handle mouse bindings
+    if (binding == SC_MOUSE_BINDING_BACK) {
+        button = SC_MOUSE_BUTTON_X1;
+    } else {
+        // SC_MOUSE_BINDING_CLICK
+        button = SC_MOUSE_BUTTON_LEFT;
+    }
+
+    if (down) {
+        screen->mouse_buttons_state |= button;
+    } else {
+        screen->mouse_buttons_state &= ~button;
+    }
 
     struct sc_mouse_click_event evt = {
         // .position not used for HID events
         .action = sc_action_from_sdl_mousebutton_type(event->type),
-        .button = sc_mouse_button_from_sdl(event->button),
-        .buttons_state = sc_mouse_buttons_state_from_sdl(sdl_buttons_state),
+        .button = button,
+        .buttons_state = screen->mouse_buttons_state,
     };
 
     assert(mp->ops->process_mouse_click);
@@ -172,13 +272,11 @@ sc_screen_otg_process_mouse_wheel(struct sc_screen_otg *screen,
     assert(screen->mouse);
     struct sc_mouse_processor *mp = &screen->mouse->mouse_processor;
 
-    uint32_t sdl_buttons_state = SDL_GetMouseState(NULL, NULL);
-
     struct sc_mouse_scroll_event evt = {
         // .position not used for HID events
         .hscroll = event->x,
         .vscroll = event->y,
-        .buttons_state = sc_mouse_buttons_state_from_sdl(sdl_buttons_state),
+        .buttons_state = screen->mouse_buttons_state,
     };
 
     assert(mp->ops->process_mouse_scroll);

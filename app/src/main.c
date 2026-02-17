@@ -5,13 +5,14 @@
 #ifdef HAVE_V4L2
 # include <libavdevice/avdevice.h>
 #endif
-#define SDL_MAIN_HANDLED // avoid link error on Linux Windows Subsystem
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 #include "cli.h"
 #include "options.h"
 #include "scrcpy.h"
-#include "usb/scrcpy_otg.h"
+#ifdef HAVE_USB
+# include "usb/scrcpy_otg.h"
+#endif
 #include "util/log.h"
 #include "util/net.h"
 #include "util/thread.h"

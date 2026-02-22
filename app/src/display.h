@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <libavutil/frame.h>
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 #include "coords.h"
 #include "opengl.h"
@@ -26,16 +26,19 @@ struct sc_display {
 #endif
 
     bool mipmaps;
+    uint32_t texture_id; // only set if mipmaps is enabled
 
     struct {
-#define SC_DISPLAY_PENDING_FLAG_SIZE 1
+#define SC_DISPLAY_PENDING_FLAG_TEXTURE 1
 #define SC_DISPLAY_PENDING_FLAG_FRAME 2
         int8_t flags;
-        struct sc_size size;
+        struct {
+            struct sc_size size;
+            enum AVColorSpace color_space;
+            enum AVColorRange color_range;
+        } texture;
         AVFrame *frame;
     } pending;
-
-    bool has_frame;
 };
 
 enum sc_display_result {
@@ -52,7 +55,9 @@ void
 sc_display_destroy(struct sc_display *display);
 
 enum sc_display_result
-sc_display_set_texture_size(struct sc_display *display, struct sc_size size);
+sc_display_prepare_texture(struct sc_display *display, struct sc_size size,
+                           enum AVColorSpace color_space,
+                           enum AVColorRange color_range);
 
 enum sc_display_result
 sc_display_update_texture(struct sc_display *display, const AVFrame *frame);

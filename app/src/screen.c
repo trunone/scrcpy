@@ -2,12 +2,13 @@
 
 #include <assert.h>
 #include <string.h>
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 #include "events.h"
 #include "icon.h"
 #include "options.h"
 #include "util/log.h"
+#include "util/sdl.h"
 
 #define DISPLAY_MARGINS 96
 
@@ -26,45 +27,25 @@ get_oriented_size(struct sc_size size, enum sc_orientation orientation) {
     return oriented_size;
 }
 
-// get the window size in a struct sc_size
-static struct sc_size
-get_window_size(const struct sc_screen *screen) {
-    int width;
-    int height;
-    SDL_GetWindowSize(screen->window, &width, &height);
-
-    struct sc_size size;
-    size.width = width;
-    size.height = height;
-    return size;
-}
-
-static struct sc_point
-get_window_position(const struct sc_screen *screen) {
-    int x;
-    int y;
-    SDL_GetWindowPosition(screen->window, &x, &y);
-
-    struct sc_point point;
-    point.x = x;
-    point.y = y;
-    return point;
-}
-
-// set the window size to be applied when fullscreen is disabled
-static void
-set_window_size(struct sc_screen *screen, struct sc_size new_size) {
-    assert(!screen->fullscreen);
-    assert(!screen->maximized);
-    assert(!screen->minimized);
-    SDL_SetWindowSize(screen->window, new_size.width, new_size.height);
+static inline bool
+is_windowed(struct sc_screen *screen) {
+    return !(SDL_GetWindowFlags(screen->window) & (SDL_WINDOW_FULLSCREEN
+                                                 | SDL_WINDOW_MINIMIZED
+                                                 | SDL_WINDOW_MAXIMIZED));
 }
 
 // get the preferred display bounds (i.e. the screen bounds with some margins)
 static bool
 get_preferred_display_bounds(struct sc_size *bounds) {
     SDL_Rect rect;
-    if (SDL_GetDisplayUsableBounds(0, &rect)) {
+    SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    if (!display) {
+        LOGW("Could not get primary display: %s", SDL_GetError());
+        return false;
+    }
+
+    bool ok = SDL_GetDisplayUsableBounds(display, &rect);
+    if (!ok) {
         LOGW("Could not get display usable bounds: %s", SDL_GetError());
         return false;
     }
@@ -166,13 +147,10 @@ static void
 sc_screen_update_content_rect(struct sc_screen *screen) {
     assert(screen->video);
 
-    int dw;
-    int dh;
-    SDL_GL_GetDrawableSize(screen->window, &dw, &dh);
-
     struct sc_size content_size = screen->content_size;
     // The drawable size is the window size * the HiDPI scale
-    struct sc_size drawable_size = {dw, dh};
+    struct sc_size drawable_size =
+        sc_sdl_get_window_size_in_pixels(screen->window);
 
     SDL_Rect *rect = &screen->rect;
 
@@ -208,6 +186,7 @@ sc_screen_update_content_rect(struct sc_screen *screen) {
 static void
 sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     assert(screen->video);
+    assert(screen->has_video_window);
 
     if (update_content_rect) {
         sc_screen_update_content_rect(screen);
@@ -235,18 +214,18 @@ sc_screen_render_novideo(struct sc_screen *screen) {
 //
 // <https://bugzilla.libsdl.org/show_bug.cgi?id=2077>
 // <https://stackoverflow.com/a/40693139/1987178>
-static int
+static bool
 event_watcher(void *data, SDL_Event *event) {
     struct sc_screen *screen = data;
     assert(screen->video);
 
-    if (event->type == SDL_WINDOWEVENT
-            && event->window.event == SDL_WINDOWEVENT_RESIZED) {
+    if (event->type == SDL_EVENT_WINDOW_RESIZED) {
         // In practice, it seems to always be called from the same thread in
         // that specific case. Anyway, it's just a workaround.
         sc_screen_render(screen, true);
     }
-    return 0;
+
+    return true;
 }
 #endif
 
@@ -257,23 +236,11 @@ sc_screen_frame_sink_open(struct sc_frame_sink *sink,
     (void) ctx;
 
     struct sc_screen *screen = DOWNCAST(sink);
+    (void) screen;
 
     if (ctx->width <= 0 || ctx->width > 0xFFFF
             || ctx->height <= 0 || ctx->height > 0xFFFF) {
         LOGE("Invalid video size: %dx%d", ctx->width, ctx->height);
-        return false;
-    }
-
-    assert(ctx->width > 0 && ctx->width <= 0xFFFF);
-    assert(ctx->height > 0 && ctx->height <= 0xFFFF);
-    // screen->frame_size is never used before the event is pushed, and the
-    // event acts as a memory barrier so it is safe without mutex
-    screen->frame_size.width = ctx->width;
-    screen->frame_size.height = ctx->height;
-
-    // Post the event on the UI thread (the texture must be created from there)
-    bool ok = sc_push_event(SC_EVENT_SCREEN_INIT_SIZE);
-    if (!ok) {
         return false;
     }
 
@@ -327,9 +294,7 @@ sc_screen_init(struct sc_screen *screen,
                const struct sc_screen_params *params) {
     screen->resize_pending = false;
     screen->has_frame = false;
-    screen->fullscreen = false;
-    screen->maximized = false;
-    screen->minimized = false;
+    screen->has_video_window = false;
     screen->paused = false;
     screen->resume_frame = NULL;
     screen->orientation = SC_ORIENTATION_0;
@@ -360,7 +325,7 @@ sc_screen_init(struct sc_screen *screen,
         }
     }
 
-    uint32_t window_flags = SDL_WINDOW_ALLOW_HIGHDPI;
+    uint32_t window_flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (params->always_on_top) {
         window_flags |= SDL_WINDOW_ALWAYS_ON_TOP;
     }
@@ -394,15 +359,24 @@ sc_screen_init(struct sc_screen *screen,
     }
 
     // The window will be positioned and sized on first video frame
-    screen->window = SDL_CreateWindow(title, x, y, width, height, window_flags);
+    screen->window =
+        sc_sdl_create_window(title, x, y, width, height, window_flags);
     if (!screen->window) {
         LOGE("Could not create window: %s", SDL_GetError());
         goto error_destroy_fps_counter;
     }
 
+    ok = SDL_StartTextInput(screen->window);
+    if (!ok) {
+        LOGE("Could not enable text input: %s", SDL_GetError());
+        goto error_destroy_window;
+    }
+
     SDL_Surface *icon = scrcpy_icon_load();
     if (icon) {
-        SDL_SetWindowIcon(screen->window, icon);
+        if (!SDL_SetWindowIcon(screen->window, icon)) {
+            LOGW("Could not set window icon: %s", SDL_GetError());
+        }
     } else if (params->video) {
         // just a warning
         LOGW("Could not load icon");
@@ -449,7 +423,11 @@ sc_screen_init(struct sc_screen *screen,
 
 #ifdef CONTINUOUS_RESIZING_WORKAROUND
     if (screen->video) {
-        SDL_AddEventWatch(event_watcher, screen);
+        ok = SDL_AddEventWatch(event_watcher, screen);
+        if (!ok) {
+            LOGW("Could not add event watcher for continuous resizing: %s",
+                 SDL_GetError());
+        }
     }
 #endif
 
@@ -490,13 +468,18 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
           ? screen->req.x : (int) SDL_WINDOWPOS_CENTERED;
     int y = screen->req.y != SC_WINDOW_POSITION_UNDEFINED
           ? screen->req.y : (int) SDL_WINDOWPOS_CENTERED;
+    struct sc_point position = {
+        .x = x,
+        .y = y,
+    };
 
     struct sc_size window_size =
         get_initial_optimal_size(screen->content_size, screen->req.width,
                                                        screen->req.height);
 
-    set_window_size(screen, window_size);
-    SDL_SetWindowPosition(screen->window, x, y);
+    assert(is_windowed(screen));
+    sc_sdl_set_window_size(screen->window, window_size);
+    sc_sdl_set_window_position(screen->window, position);
 
     if (screen->req.fullscreen) {
         sc_screen_toggle_fullscreen(screen);
@@ -506,13 +489,13 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
         sc_fps_counter_start(&screen->fps_counter);
     }
 
-    SDL_ShowWindow(screen->window);
+    sc_sdl_show_window(screen->window);
     sc_screen_update_content_rect(screen);
 }
 
 void
 sc_screen_hide_window(struct sc_screen *screen) {
-    SDL_HideWindow(screen->window);
+    sc_sdl_hide_window(screen->window);
 }
 
 void
@@ -542,7 +525,7 @@ resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
                    struct sc_size new_content_size) {
     assert(screen->video);
 
-    struct sc_size window_size = get_window_size(screen);
+    struct sc_size window_size = sc_sdl_get_window_size(screen->window);
     struct sc_size target_size = {
         .width = (uint32_t) window_size.width * new_content_size.width
                 / old_content_size.width,
@@ -550,14 +533,15 @@ resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
                 / old_content_size.height,
     };
     target_size = get_optimal_size(target_size, new_content_size, true);
-    set_window_size(screen, target_size);
+    assert(is_windowed(screen));
+    sc_sdl_set_window_size(screen->window, target_size);
 }
 
 static void
 set_content_size(struct sc_screen *screen, struct sc_size new_content_size) {
     assert(screen->video);
 
-    if (!screen->fullscreen && !screen->maximized && !screen->minimized) {
+    if (is_windowed(screen)) {
         resize_for_content(screen, screen->content_size, new_content_size);
     } else if (!screen->resize_pending) {
         // Store the windowed size to be able to compute the optimal size once
@@ -573,9 +557,7 @@ static void
 apply_pending_resize(struct sc_screen *screen) {
     assert(screen->video);
 
-    assert(!screen->fullscreen);
-    assert(!screen->maximized);
-    assert(!screen->minimized);
+    assert(is_windowed(screen));
     if (screen->resize_pending) {
         resize_for_content(screen, screen->windowed_content_size,
                                    screen->content_size);
@@ -604,44 +586,6 @@ sc_screen_set_orientation(struct sc_screen *screen,
 }
 
 static bool
-sc_screen_init_size(struct sc_screen *screen) {
-    // Before first frame
-    assert(!screen->has_frame);
-
-    // The requested size is passed via screen->frame_size
-
-    struct sc_size content_size =
-        get_oriented_size(screen->frame_size, screen->orientation);
-    screen->content_size = content_size;
-
-    enum sc_display_result res =
-        sc_display_set_texture_size(&screen->display, screen->frame_size);
-    return res != SC_DISPLAY_RESULT_ERROR;
-}
-
-// recreate the texture and resize the window if the frame size has changed
-static enum sc_display_result
-prepare_for_frame(struct sc_screen *screen, struct sc_size new_frame_size) {
-    assert(screen->video);
-
-    if (screen->frame_size.width == new_frame_size.width
-            && screen->frame_size.height == new_frame_size.height) {
-        return SC_DISPLAY_RESULT_OK;
-    }
-
-    // frame dimension changed
-    screen->frame_size = new_frame_size;
-
-    struct sc_size new_content_size =
-        get_oriented_size(new_frame_size, screen->orientation);
-    set_content_size(screen, new_content_size);
-
-    sc_screen_update_content_rect(screen);
-
-    return sc_display_set_texture_size(&screen->display, screen->frame_size);
-}
-
-static bool
 sc_screen_apply_frame(struct sc_screen *screen) {
     assert(screen->video);
 
@@ -649,7 +593,38 @@ sc_screen_apply_frame(struct sc_screen *screen) {
 
     AVFrame *frame = screen->frame;
     struct sc_size new_frame_size = {frame->width, frame->height};
-    enum sc_display_result res = prepare_for_frame(screen, new_frame_size);
+
+    if (!screen->has_frame
+            || screen->frame_size.width != new_frame_size.width
+            || screen->frame_size.height != new_frame_size.height) {
+        // frame dimension changed
+        screen->frame_size = new_frame_size;
+
+        struct sc_size new_content_size =
+            get_oriented_size(new_frame_size, screen->orientation);
+        if (screen->has_frame) {
+            set_content_size(screen, new_content_size);
+            sc_screen_update_content_rect(screen);
+        } else {
+            // This is the first frame
+            screen->has_frame = true;
+            screen->content_size = new_content_size;
+        }
+
+        enum sc_display_result res =
+            sc_display_prepare_texture(&screen->display, screen->frame_size,
+                                       frame->colorspace, frame->color_range);
+        if (res == SC_DISPLAY_RESULT_ERROR) {
+            return false;
+        }
+        if (res == SC_DISPLAY_RESULT_PENDING) {
+            // Not an error, but do not continue
+            return true;
+        }
+    }
+
+    enum sc_display_result res =
+        sc_display_update_texture(&screen->display, frame);
     if (res == SC_DISPLAY_RESULT_ERROR) {
         return false;
     }
@@ -658,17 +633,9 @@ sc_screen_apply_frame(struct sc_screen *screen) {
         return true;
     }
 
-    res = sc_display_update_texture(&screen->display, frame);
-    if (res == SC_DISPLAY_RESULT_ERROR) {
-        return false;
-    }
-    if (res == SC_DISPLAY_RESULT_PENDING) {
-        // Not an error, but do not continue
-        return true;
-    }
-
-    if (!screen->has_frame) {
-        screen->has_frame = true;
+    assert(screen->has_frame);
+    if (!screen->has_video_window) {
+        screen->has_video_window = true;
         // this is the very first frame, show the window
         sc_screen_show_initial_window(screen);
 
@@ -738,31 +705,28 @@ void
 sc_screen_toggle_fullscreen(struct sc_screen *screen) {
     assert(screen->video);
 
-    uint32_t new_mode = screen->fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP;
-    if (SDL_SetWindowFullscreen(screen->window, new_mode)) {
+    bool req_fullscreen =
+        !(SDL_GetWindowFlags(screen->window) & SDL_WINDOW_FULLSCREEN);
+
+    bool ok = SDL_SetWindowFullscreen(screen->window, req_fullscreen);
+    if (!ok) {
         LOGW("Could not switch fullscreen mode: %s", SDL_GetError());
         return;
     }
 
-    screen->fullscreen = !screen->fullscreen;
-    if (!screen->fullscreen && !screen->maximized && !screen->minimized) {
-        apply_pending_resize(screen);
-    }
-
-    LOGD("Switched to %s mode", screen->fullscreen ? "fullscreen" : "windowed");
-    sc_screen_render(screen, true);
+    LOGD("Requested %s mode", req_fullscreen ? "fullscreen" : "windowed");
 }
 
 void
 sc_screen_resize_to_fit(struct sc_screen *screen) {
     assert(screen->video);
 
-    if (screen->fullscreen || screen->maximized || screen->minimized) {
+    if (!is_windowed(screen)) {
         return;
     }
 
-    struct sc_point point = get_window_position(screen);
-    struct sc_size window_size = get_window_size(screen);
+    struct sc_point point = sc_sdl_get_window_position(screen->window);
+    struct sc_size window_size = sc_sdl_get_window_size(screen->window);
 
     struct sc_size optimal_size =
         get_optimal_size(window_size, screen->content_size, false);
@@ -770,11 +734,14 @@ sc_screen_resize_to_fit(struct sc_screen *screen) {
     // Center the window related to the device screen
     assert(optimal_size.width <= window_size.width);
     assert(optimal_size.height <= window_size.height);
-    uint32_t new_x = point.x + (window_size.width - optimal_size.width) / 2;
-    uint32_t new_y = point.y + (window_size.height - optimal_size.height) / 2;
 
-    SDL_SetWindowSize(screen->window, optimal_size.width, optimal_size.height);
-    SDL_SetWindowPosition(screen->window, new_x, new_y);
+    struct sc_point new_position = {
+        .x = point.x + (window_size.width - optimal_size.width) / 2,
+        .y = point.y + (window_size.height - optimal_size.height) / 2,
+    };
+
+    sc_sdl_set_window_size(screen->window, optimal_size);
+    sc_sdl_set_window_position(screen->window, new_position);
     LOGD("Resized to optimal size: %ux%u", optimal_size.width,
                                            optimal_size.height);
 }
@@ -783,33 +750,21 @@ void
 sc_screen_resize_to_pixel_perfect(struct sc_screen *screen) {
     assert(screen->video);
 
-    if (screen->fullscreen || screen->minimized) {
+    if (!is_windowed(screen)) {
         return;
     }
 
-    if (screen->maximized) {
-        SDL_RestoreWindow(screen->window);
-        screen->maximized = false;
-    }
-
     struct sc_size content_size = screen->content_size;
-    SDL_SetWindowSize(screen->window, content_size.width, content_size.height);
+    sc_sdl_set_window_size(screen->window, content_size);
     LOGD("Resized to pixel-perfect: %ux%u", content_size.width,
                                             content_size.height);
 }
 
 bool
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+    // !video implies !has_video_window
+    assert(screen->video || !screen->has_video_window);
     switch (event->type) {
-        case SC_EVENT_SCREEN_INIT_SIZE: {
-            // The initial size is passed via screen->frame_size
-            bool ok = sc_screen_init_size(screen);
-            if (!ok) {
-                LOGE("Could not initialize screen size");
-                return false;
-            }
-            return true;
-        }
         case SC_EVENT_NEW_FRAME: {
             bool ok = sc_screen_update_frame(screen);
             if (!ok) {
@@ -818,45 +773,34 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             }
             return true;
         }
-        case SDL_WINDOWEVENT:
-            if (!screen->video
-                    && event->window.event == SDL_WINDOWEVENT_EXPOSED) {
+        case SDL_EVENT_WINDOW_EXPOSED:
+            if (!screen->video) {
                 sc_screen_render_novideo(screen);
+            } else if (screen->has_video_window) {
+                sc_screen_render(screen, true);
             }
-
-            // !video implies !has_frame
-            assert(screen->video || !screen->has_frame);
-            if (!screen->has_frame) {
-                // Do nothing
-                return true;
+            return true;
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            if (screen->has_video_window) {
+                sc_screen_render(screen, true);
             }
-            switch (event->window.event) {
-                case SDL_WINDOWEVENT_EXPOSED:
-                    sc_screen_render(screen, true);
-                    break;
-                case SDL_WINDOWEVENT_SIZE_CHANGED:
-                    sc_screen_render(screen, true);
-                    break;
-                case SDL_WINDOWEVENT_MAXIMIZED:
-                    screen->maximized = true;
-                    break;
-                case SDL_WINDOWEVENT_MINIMIZED:
-                    screen->minimized = true;
-                    break;
-                case SDL_WINDOWEVENT_RESTORED:
-                    if (screen->fullscreen) {
-                        // On Windows, in maximized+fullscreen, disabling
-                        // fullscreen mode unexpectedly triggers the "restored"
-                        // then "maximized" events, leaving the window in a
-                        // weird state (maximized according to the events, but
-                        // not maximized visually).
-                        break;
-                    }
-                    screen->maximized = false;
-                    screen->minimized = false;
-                    apply_pending_resize(screen);
-                    sc_screen_render(screen, true);
-                    break;
+            return true;
+        case SDL_EVENT_WINDOW_RESTORED:
+            if (screen->has_video_window && is_windowed(screen)) {
+                apply_pending_resize(screen);
+                sc_screen_render(screen, true);
+            }
+            return true;
+        case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+            LOGD("Switched to fullscreen mode");
+            assert(screen->has_video_window);
+            return true;
+        case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+            LOGD("Switched to windowed mode");
+            assert(screen->has_video_window);
+            if (is_windowed(screen)) {
+                apply_pending_resize(screen);
+                sc_screen_render(screen, true);
             }
             return true;
     }
@@ -937,9 +881,15 @@ sc_screen_convert_window_to_frame_coords(struct sc_screen *screen,
 void
 sc_screen_hidpi_scale_coords(struct sc_screen *screen, int32_t *x, int32_t *y) {
     // take the HiDPI scaling (dw/ww and dh/wh) into account
-    int ww, wh, dw, dh;
-    SDL_GetWindowSize(screen->window, &ww, &wh);
-    SDL_GL_GetDrawableSize(screen->window, &dw, &dh);
+
+    struct sc_size window_size = sc_sdl_get_window_size(screen->window);
+    int64_t ww = window_size.width;
+    int64_t wh = window_size.height;
+
+    struct sc_size drawable_size =
+        sc_sdl_get_window_size_in_pixels(screen->window);
+    int64_t dw = drawable_size.width;
+    int64_t dh = drawable_size.height;
 
     // scale for HiDPI (64 bits for intermediate multiplications)
     *x = (int64_t) *x * dw / ww;

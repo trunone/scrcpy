@@ -4,17 +4,61 @@
 #include <stddef.h>
 
 #include "icon.h"
+#include "input_events.h"
 #include "options.h"
 #include "util/acksync.h"
 #include "util/log.h"
+#include "util/sdl.h"
 
 static void
 sc_screen_otg_render(struct sc_screen_otg *screen) {
-    SDL_RenderClear(screen->renderer);
+    sc_sdl_render_clear(screen->renderer);
     if (screen->texture) {
-        SDL_RenderCopy(screen->renderer, screen->texture, NULL, NULL);
+        bool ok =
+            SDL_RenderTexture(screen->renderer, screen->texture, NULL, NULL);
+        if (!ok) {
+            LOGW("Could not render texture: %s", SDL_GetError());
+        }
     }
-    SDL_RenderPresent(screen->renderer);
+    sc_sdl_render_present(screen->renderer);
+}
+
+static enum sc_mouse_binding
+sc_screen_otg_get_binding(const struct sc_mouse_binding_set *bindings,
+                          uint8_t sdl_button) {
+    switch (sdl_button) {
+        case SDL_BUTTON_LEFT:
+            return SC_MOUSE_BINDING_CLICK;
+        case SDL_BUTTON_RIGHT:
+            return bindings->right_click;
+        case SDL_BUTTON_MIDDLE:
+            return bindings->middle_click;
+        case SDL_BUTTON_X1:
+            return bindings->click4;
+        case SDL_BUTTON_X2:
+            return bindings->click5;
+        default:
+            return SC_MOUSE_BINDING_DISABLED;
+    }
+}
+
+static void
+sc_screen_otg_inject_key(struct sc_keyboard_aoa *keyboard,
+                         enum sc_action action, enum sc_scancode scancode,
+                         uint16_t mods) {
+    if (!keyboard) {
+        return;
+    }
+    struct sc_key_event evt = {
+        .action = action,
+        .keycode = SC_KEYCODE_UNKNOWN, // not used for HID
+        .scancode = scancode,
+        .mods_state = mods,
+        .repeat = false,
+    };
+    struct sc_key_processor *kp = &keyboard->key_processor;
+    assert(kp->ops->process_key);
+    kp->ops->process_key(kp, &evt, SC_SEQUENCE_INVALID);
 }
 
 bool
@@ -23,6 +67,8 @@ sc_screen_otg_init(struct sc_screen_otg *screen,
     screen->keyboard = params->keyboard;
     screen->mouse = params->mouse;
     screen->gamepad = params->gamepad;
+    screen->mouse_bindings = params->mouse_bindings;
+    screen->mouse_buttons_state = 0;
 
     const char *title = params->window_title;
     assert(title);
@@ -34,7 +80,7 @@ sc_screen_otg_init(struct sc_screen_otg *screen,
     int width = params->window_width ? params->window_width : 256;
     int height = params->window_height ? params->window_height : 256;
 
-    uint32_t window_flags = SDL_WINDOW_ALLOW_HIGHDPI;
+    uint32_t window_flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (params->always_on_top) {
         window_flags |= SDL_WINDOW_ALWAYS_ON_TOP;
     }
@@ -42,13 +88,14 @@ sc_screen_otg_init(struct sc_screen_otg *screen,
         window_flags |= SDL_WINDOW_BORDERLESS;
     }
 
-    screen->window = SDL_CreateWindow(title, x, y, width, height, window_flags);
+    screen->window =
+        sc_sdl_create_window(title, x, y, width, height, window_flags);
     if (!screen->window) {
         LOGE("Could not create window: %s", SDL_GetError());
         return false;
     }
 
-    screen->renderer = SDL_CreateRenderer(screen->window, -1, 0);
+    screen->renderer = SDL_CreateRenderer(screen->window, NULL);
     if (!screen->renderer) {
         LOGE("Could not create renderer: %s", SDL_GetError());
         goto error_destroy_window;
@@ -57,9 +104,15 @@ sc_screen_otg_init(struct sc_screen_otg *screen,
     SDL_Surface *icon = scrcpy_icon_load();
 
     if (icon) {
-        SDL_SetWindowIcon(screen->window, icon);
+        bool ok = SDL_SetWindowIcon(screen->window, icon);
+        if (!ok) {
+            LOGW("Could not set window icon: %s", SDL_GetError());
+        }
 
-        if (SDL_RenderSetLogicalSize(screen->renderer, icon->w, icon->h)) {
+        ok = SDL_SetRenderLogicalPresentation(screen->renderer, icon->w,
+                                              icon->h,
+                                         SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        if (!ok) {
             LOGW("Could not set renderer logical size: %s", SDL_GetError());
             // don't fail
         }
@@ -108,10 +161,10 @@ sc_screen_otg_process_key(struct sc_screen_otg *screen,
 
     struct sc_key_event evt = {
         .action = sc_action_from_sdl_keyboard_type(event->type),
-        .keycode = sc_keycode_from_sdl(event->keysym.sym),
-        .scancode = sc_scancode_from_sdl(event->keysym.scancode),
+        .keycode = sc_keycode_from_sdl(event->key),
+        .scancode = sc_scancode_from_sdl(event->scancode),
         .repeat = event->repeat,
-        .mods_state = sc_mods_state_from_sdl(event->keysym.mod),
+        .mods_state = sc_mods_state_from_sdl(event->mod),
     };
 
     assert(kp->ops->process_key);
@@ -128,7 +181,7 @@ sc_screen_otg_process_mouse_motion(struct sc_screen_otg *screen,
         // .position not used for HID events
         .xrel = event->xrel,
         .yrel = event->yrel,
-        .buttons_state = sc_mouse_buttons_state_from_sdl(event->state),
+        .buttons_state = screen->mouse_buttons_state,
     };
 
     assert(mp->ops->process_mouse_motion);
@@ -141,13 +194,72 @@ sc_screen_otg_process_mouse_button(struct sc_screen_otg *screen,
     assert(screen->mouse);
     struct sc_mouse_processor *mp = &screen->mouse->mouse_processor;
 
-    uint32_t sdl_buttons_state = SDL_GetMouseState(NULL, NULL);
+    bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+
+    SDL_Keymod keymod = SDL_GetModState();
+    bool shift_pressed = keymod & SDL_KMOD_SHIFT;
+
+    struct sc_mouse_binding_set *bindings = !shift_pressed
+                                          ? &screen->mouse_bindings.pri
+                                          : &screen->mouse_bindings.sec;
+
+    enum sc_mouse_binding binding =
+        sc_screen_otg_get_binding(bindings, event->button);
+
+    enum sc_mouse_button button = sc_mouse_button_from_sdl(event->button);
+    if (button == SC_MOUSE_BUTTON_UNKNOWN) {
+        return;
+    }
+
+    if (binding != SC_MOUSE_BINDING_CLICK &&
+            binding != SC_MOUSE_BINDING_BACK &&
+            binding != SC_MOUSE_BINDING_DISABLED) {
+        // Handle key bindings
+        if (screen->keyboard) {
+            enum sc_action action = down ? SC_ACTION_DOWN : SC_ACTION_UP;
+            switch (binding) {
+                case SC_MOUSE_BINDING_HOME:
+                    sc_screen_otg_inject_key(screen->keyboard, action,
+                                             SC_SCANCODE_RETURN, SC_MOD_LGUI);
+                    break;
+                case SC_MOUSE_BINDING_APP_SWITCH:
+                    sc_screen_otg_inject_key(screen->keyboard, action,
+                                             SC_SCANCODE_TAB, SC_MOD_LALT);
+                    break;
+                case SC_MOUSE_BINDING_EXPAND_NOTIFICATION_PANEL:
+                    sc_screen_otg_inject_key(screen->keyboard, action,
+                                             SC_SCANCODE_N, SC_MOD_LGUI);
+                    break;
+                default:
+                    break;
+            }
+        }
+        return;
+    }
+
+    if (binding == SC_MOUSE_BINDING_DISABLED) {
+        return;
+    }
+
+    // Handle mouse bindings
+    if (binding == SC_MOUSE_BINDING_BACK) {
+        button = SC_MOUSE_BUTTON_X1;
+    } else {
+        // SC_MOUSE_BINDING_CLICK
+        button = SC_MOUSE_BUTTON_LEFT;
+    }
+
+    if (down) {
+        screen->mouse_buttons_state |= button;
+    } else {
+        screen->mouse_buttons_state &= ~button;
+    }
 
     struct sc_mouse_click_event evt = {
         // .position not used for HID events
         .action = sc_action_from_sdl_mousebutton_type(event->type),
-        .button = sc_mouse_button_from_sdl(event->button),
-        .buttons_state = sc_mouse_buttons_state_from_sdl(sdl_buttons_state),
+        .button = button,
+        .buttons_state = screen->mouse_buttons_state,
     };
 
     assert(mp->ops->process_mouse_click);
@@ -160,20 +272,11 @@ sc_screen_otg_process_mouse_wheel(struct sc_screen_otg *screen,
     assert(screen->mouse);
     struct sc_mouse_processor *mp = &screen->mouse->mouse_processor;
 
-    uint32_t sdl_buttons_state = SDL_GetMouseState(NULL, NULL);
-
     struct sc_mouse_scroll_event evt = {
         // .position not used for HID events
-#if SDL_VERSION_ATLEAST(2, 0, 18)
-        .hscroll = event->preciseX,
-        .vscroll = event->preciseY,
-#else
         .hscroll = event->x,
         .vscroll = event->y,
-#endif
-        .hscroll_int = event->x,
-        .vscroll_int = event->y,
-        .buttons_state = sc_mouse_buttons_state_from_sdl(sdl_buttons_state),
+        .buttons_state = screen->mouse_buttons_state,
     };
 
     assert(mp->ops->process_mouse_scroll);
@@ -182,34 +285,34 @@ sc_screen_otg_process_mouse_wheel(struct sc_screen_otg *screen,
 
 static void
 sc_screen_otg_process_gamepad_device(struct sc_screen_otg *screen,
-                                     const SDL_ControllerDeviceEvent *event) {
+                                     const SDL_GamepadDeviceEvent *event) {
     assert(screen->gamepad);
     struct sc_gamepad_processor *gp = &screen->gamepad->gamepad_processor;
 
-    if (event->type == SDL_CONTROLLERDEVICEADDED) {
-        SDL_GameController *gc = SDL_GameControllerOpen(event->which);
-        if (!gc) {
-            LOGW("Could not open game controller");
+    if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
+        SDL_Gamepad *sdl_gamepad = SDL_OpenGamepad(event->which);
+        if (!sdl_gamepad) {
+            LOGW("Could not open gamepad");
             return;
         }
 
-        SDL_Joystick *joystick = SDL_GameControllerGetJoystick(gc);
+        SDL_Joystick *joystick = SDL_GetGamepadJoystick(sdl_gamepad);
         if (!joystick) {
-            LOGW("Could not get controller joystick");
-            SDL_GameControllerClose(gc);
+            LOGW("Could not get gamepad joystick");
+            SDL_CloseGamepad(sdl_gamepad);
             return;
         }
 
         struct sc_gamepad_device_event evt = {
-            .gamepad_id = SDL_JoystickInstanceID(joystick),
+            .gamepad_id = SDL_GetJoystickID(joystick),
         };
         gp->ops->process_gamepad_added(gp, &evt);
-    } else if (event->type == SDL_CONTROLLERDEVICEREMOVED) {
+    } else if (event->type == SDL_EVENT_GAMEPAD_REMOVED) {
         SDL_JoystickID id = event->which;
 
-        SDL_GameController *gc = SDL_GameControllerFromInstanceID(id);
-        if (gc) {
-            SDL_GameControllerClose(gc);
+        SDL_Gamepad *sdl_gamepad = SDL_GetGamepadFromID(id);
+        if (sdl_gamepad) {
+            SDL_CloseGamepad(sdl_gamepad);
         } else {
             LOGW("Unknown gamepad device removed");
         }
@@ -223,7 +326,7 @@ sc_screen_otg_process_gamepad_device(struct sc_screen_otg *screen,
 
 static void
 sc_screen_otg_process_gamepad_axis(struct sc_screen_otg *screen,
-                                   const SDL_ControllerAxisEvent *event) {
+                                   const SDL_GamepadAxisEvent *event) {
     assert(screen->gamepad);
     struct sc_gamepad_processor *gp = &screen->gamepad->gamepad_processor;
 
@@ -242,7 +345,7 @@ sc_screen_otg_process_gamepad_axis(struct sc_screen_otg *screen,
 
 static void
 sc_screen_otg_process_gamepad_button(struct sc_screen_otg *screen,
-                                     const SDL_ControllerButtonEvent *event) {
+                                     const SDL_GamepadButtonEvent *event) {
     assert(screen->gamepad);
     struct sc_gamepad_processor *gp = &screen->gamepad->gamepad_processor;
 
@@ -253,7 +356,7 @@ sc_screen_otg_process_gamepad_button(struct sc_screen_otg *screen,
 
     struct sc_gamepad_button_event evt = {
         .gamepad_id = event->which,
-        .action = sc_action_from_sdl_controllerbutton_type(event->type),
+        .action = sc_action_from_sdl_gamepad_button_type(event->type),
         .button = button,
     };
     gp->ops->process_gamepad_button(gp, &evt);
@@ -267,59 +370,55 @@ sc_screen_otg_handle_event(struct sc_screen_otg *screen, SDL_Event *event) {
     }
 
     switch (event->type) {
-        case SDL_WINDOWEVENT:
-            switch (event->window.event) {
-                case SDL_WINDOWEVENT_EXPOSED:
-                    sc_screen_otg_render(screen);
-                    break;
-            }
-            return;
-        case SDL_KEYDOWN:
+        case SDL_EVENT_WINDOW_EXPOSED:
+            sc_screen_otg_render(screen);
+            break;
+        case SDL_EVENT_KEY_DOWN:
             if (screen->keyboard) {
                 sc_screen_otg_process_key(screen, &event->key);
             }
             break;
-        case SDL_KEYUP:
+        case SDL_EVENT_KEY_UP:
             if (screen->keyboard) {
                 sc_screen_otg_process_key(screen, &event->key);
             }
             break;
-        case SDL_MOUSEMOTION:
+        case SDL_EVENT_MOUSE_MOTION:
             if (screen->mouse) {
                 sc_screen_otg_process_mouse_motion(screen, &event->motion);
             }
             break;
-        case SDL_MOUSEBUTTONDOWN:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
             if (screen->mouse) {
                 sc_screen_otg_process_mouse_button(screen, &event->button);
             }
             break;
-        case SDL_MOUSEBUTTONUP:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
             if (screen->mouse) {
                 sc_screen_otg_process_mouse_button(screen, &event->button);
             }
             break;
-        case SDL_MOUSEWHEEL:
+        case SDL_EVENT_MOUSE_WHEEL:
             if (screen->mouse) {
                 sc_screen_otg_process_mouse_wheel(screen, &event->wheel);
             }
             break;
-        case SDL_CONTROLLERDEVICEADDED:
-        case SDL_CONTROLLERDEVICEREMOVED:
+        case SDL_EVENT_GAMEPAD_ADDED:
+        case SDL_EVENT_GAMEPAD_REMOVED:
             // Handle device added or removed even if paused
             if (screen->gamepad) {
-                sc_screen_otg_process_gamepad_device(screen, &event->cdevice);
+                sc_screen_otg_process_gamepad_device(screen, &event->gdevice);
             }
             break;
-        case SDL_CONTROLLERAXISMOTION:
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
             if (screen->gamepad) {
-                sc_screen_otg_process_gamepad_axis(screen, &event->caxis);
+                sc_screen_otg_process_gamepad_axis(screen, &event->gaxis);
             }
             break;
-        case SDL_CONTROLLERBUTTONDOWN:
-        case SDL_CONTROLLERBUTTONUP:
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
             if (screen->gamepad) {
-                sc_screen_otg_process_gamepad_button(screen, &event->cbutton);
+                sc_screen_otg_process_gamepad_button(screen, &event->gbutton);
             }
             break;
     }

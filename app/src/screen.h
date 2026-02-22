@@ -5,7 +5,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
@@ -61,9 +61,7 @@ struct sc_screen {
     // rectangle of the content (excluding black borders)
     struct SDL_Rect rect;
     bool has_frame;
-    bool fullscreen;
-    bool maximized;
-    bool minimized;
+    bool has_video_window;
 
     AVFrame *frame;
 

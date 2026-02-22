@@ -5,9 +5,10 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 #include "mouse_capture.h"
+#include "options.h"
 #include "usb/gamepad_aoa.h"
 #include "usb/keyboard_aoa.h"
 #include "usb/mouse_aoa.h"
@@ -22,6 +23,9 @@ struct sc_screen_otg {
     SDL_Texture *texture;
 
     struct sc_mouse_capture mc;
+
+    struct sc_mouse_bindings mouse_bindings;
+    uint8_t mouse_buttons_state; // bitwise-OR of sc_mouse_button values
 };
 
 struct sc_screen_otg_params {
@@ -37,6 +41,8 @@ struct sc_screen_otg_params {
     uint16_t window_height;
     bool window_borderless;
     uint8_t shortcut_mods; // OR of enum sc_shortcut_mod values
+
+    struct sc_mouse_bindings mouse_bindings;
 };
 
 bool
